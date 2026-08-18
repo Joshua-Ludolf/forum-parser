@@ -31,10 +31,7 @@ Create `.env` from `.env.example` and fill values.
 
 ## Google Sheet Setup
 
-1. Create a Google Cloud project and enable Google Sheets API + Google Drive API.
-2. Create a service account and download credentials JSON.
-3. Share your Google Sheet with the service account email.
-4. Put the JSON file path in `GOOGLE_SERVICE_ACCOUNT_FILE`.
+1. Edit google sheet ids based on yours.
 
 ## Run
 
