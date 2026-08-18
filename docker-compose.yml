@@ -1,0 +1,48 @@
+services:
+  discord-bot:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    image: joshludolf/va-forum-discord-bot:latest
+    container_name: va-forum-discord-bot
+    env_file:
+      - .env
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_MODEL=gemma4:12b-it-qat
+    depends_on:
+      # Waits until the pull helper completely finishes downloading the model
+      ollama-pull:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # The main official Ollama server (Runs continuously with GPU support)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: va-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    restart: unless-stopped
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # The temporary helper that pulls the model and then exits
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: va-ollama-pull
+    depends_on:
+      - ollama
+    environment:
+      - OLLAMA_HOST=ollama:11434
+    entrypoint: /bin/sh
+    command: -c "sleep 5 && ollama pull gemma4:12b-it-qat"
+
+volumes:
+  ollama_data:
