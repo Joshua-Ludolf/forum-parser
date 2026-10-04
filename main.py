@@ -26,6 +26,10 @@ logger = logging.getLogger("va-bot")
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 MODERATOR_CHANNEL_ID = int(os.getenv("MODERATOR_CHANNEL_ID", "0"))
 
+# Optional: set this to your server's ID while testing so slash commands sync
+# instantly to that one guild instead of taking up to an hour to appear globally.
+DEV_GUILD_ID = int(os.getenv("DEV_GUILD_ID", "0"))
+
 GOOGLE_SHEET_ID_VOICE_ACTOR = os.getenv("GOOGLE_SHEET_ID_VOICE_ACTOR", "")
 GOOGLE_SHEET_ID_DUB_REQUEST = os.getenv("GOOGLE_SHEET_ID_DUB_REQUEST", "")
 GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Form Responses 1")
@@ -34,17 +38,12 @@ GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Form Responses 1")
 # Keeps repeated command usage from hammering the public CSV endpoint.
 SHEET_CACHE_TTL_SECONDS = int(os.getenv("SHEET_CACHE_TTL_SECONDS", "45"))
 
-# Delay before exiting when Discord rejects us at startup (see main()).
-STARTUP_FAILURE_BACKOFF_SECONDS = int(os.getenv("STARTUP_FAILURE_BACKOFF_SECONDS", "300"))
-
-# LLM drafting goes through OpenRouter (https://openrouter.ai), which exposes an
-# OpenAI-compatible chat completions API. Pick a model id from
-# https://openrouter.ai/models (models ending in ":free" cost nothing but have
-# stricter rate limits).
-OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
-OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "")
-OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
-OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "60"))
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+# First request after Ollama starts (or after it's been idle) has to load the
+# model into memory first, which can take well over a minute for larger
+# models. 60s was too tight; 180s gives room for cold starts on modest hardware.
+OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
 
 
 def validate_config() -> None:
@@ -53,8 +52,6 @@ def validate_config() -> None:
         "MODERATOR_CHANNEL_ID": str(MODERATOR_CHANNEL_ID) if MODERATOR_CHANNEL_ID else "",
         "GOOGLE_SHEET_ID_VOICE_ACTOR": GOOGLE_SHEET_ID_VOICE_ACTOR,
         "GOOGLE_SHEET_ID_DUB_REQUEST": GOOGLE_SHEET_ID_DUB_REQUEST,
-        "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
-        "OPENROUTER_MODEL": OPENROUTER_MODEL,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -160,42 +157,33 @@ def find_row(records: list[dict], keywords: tuple[str, ...], target_text: str) -
 
 
 # ---------------------------------------------------------------------------
-# LLM drafting (OpenRouter)
+# Ollama drafting
 # ---------------------------------------------------------------------------
 
-def _call_llm_sync(prompt: str) -> str:
+def _call_ollama_sync(prompt: str) -> str:
     """Blocking network call — always run this via asyncio.to_thread."""
+    payload = {
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": False,
+    }
     response = requests.post(
-        f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
-        headers={
-            "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-            "Content-Type": "application/json",
-            "X-Title": "VA Forum Discord Bot",
-        },
-        json={
-            "model": OPENROUTER_MODEL,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=OPENROUTER_TIMEOUT_SECONDS,
+        f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+        json=payload,
+        timeout=OLLAMA_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     body = response.json()
-
-    # OpenRouter can return HTTP 200 with an "error" object (e.g. upstream
-    # provider failure), so check for it explicitly.
-    if "error" in body:
-        raise ValueError(f"OpenRouter error: {body['error']}")
-
-    choices = body.get("choices") or []
-    content = (choices[0].get("message", {}).get("content") if choices else None) or ""
-    return content.strip() or "I could not generate a response right now."
+    return body.get("message", {}).get("content", "").strip() or (
+        "I could not generate a response right now."
+    )
 
 
-async def call_llm(prompt: str) -> str:
-    logger.info("Requesting draft from OpenRouter model '%s'...", OPENROUTER_MODEL)
+async def call_ollama(prompt: str) -> str:
+    logger.info("Requesting draft from Ollama model '%s' (timeout=%ss)...", OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS)
     start = time.monotonic()
-    result = await asyncio.to_thread(_call_llm_sync, prompt)
-    logger.info("OpenRouter responded in %.1fs", time.monotonic() - start)
+    result = await asyncio.to_thread(_call_ollama_sync, prompt)
+    logger.info("Ollama responded in %.1fs", time.monotonic() - start)
     return result
 
 
@@ -369,46 +357,38 @@ async def post_for_review(
 # Bot setup
 # ---------------------------------------------------------------------------
 
-class VABot(commands.Bot):
-    async def setup_hook(self) -> None:
-        # setup_hook runs once per process start. on_ready fires on every
-        # gateway reconnect, so syncing there caused repeated API calls.
-        # Set SYNC_COMMANDS=false to skip syncing entirely on boot (e.g. when
-        # commands haven't changed) and cut down on requests to Discord.
-        if os.getenv("SYNC_COMMANDS", "true").lower() != "true":
-            logger.info("SYNC_COMMANDS is not 'true'; skipping slash command sync")
-            return
-        try:
-            synced = await self.tree.sync()
-            logger.info("Synced %d command(s) globally", len(synced))
-        except discord.DiscordException:
-            logger.exception("Slash command sync failed")
-
-
 def build_bot() -> commands.Bot:
-    # Only slash commands are used, so the privileged message_content intent
-    # is not needed.
     intents = discord.Intents.default()
-    bot = VABot(command_prefix="!", intents=intents)
+    intents.message_content = True
+    bot = commands.Bot(command_prefix="!", intents=intents)
 
     @bot.event
     async def on_ready() -> None:
         logger.info("Logged in as %s (id=%s)", bot.user, bot.user.id if bot.user else "unknown")
+        try:
+            if DEV_GUILD_ID:
+                guild_obj = discord.Object(id=DEV_GUILD_ID)
+                bot.tree.copy_global_to(guild=guild_obj)
+                synced = await bot.tree.sync(guild=guild_obj)
+                logger.info("Synced %d command(s) to guild %s", len(synced), DEV_GUILD_ID)
+            else:
+                synced = await bot.tree.sync()
+                logger.info(
+                    "Synced %d command(s) globally (may take up to an hour to appear)", len(synced)
+                )
+        except discord.DiscordException:
+            logger.exception("Slash command sync failed")
 
     @bot.tree.error
     async def on_app_command_error(
         interaction: discord.Interaction, error: app_commands.AppCommandError
     ) -> None:
-        logger.error("Unhandled app command error: %s", type(error).__name__, exc_info=error)
-        message = "Something went wrong. Please try again in a bit."
-        try:
-            if interaction.response.is_done():
-                await interaction.followup.send(message, ephemeral=True)
-            else:
-                await interaction.response.send_message(message, ephemeral=True)
-        except discord.HTTPException:
-            # Discord/Cloudflare is rejecting us; don't pile on more requests.
-            logger.warning("Could not deliver error message to user (Discord rejected the request)")
+        logger.exception("Unhandled app command error", exc_info=error)
+        message = f"Something went wrong: {error}"
+        if interaction.response.is_done():
+            await interaction.followup.send(message, ephemeral=True)
+        else:
+            await interaction.response.send_message(message, ephemeral=True)
 
     @bot.tree.command(
         name="auto_msg_va",
@@ -422,10 +402,7 @@ def build_bot() -> commands.Bot:
             records = await get_sheet_records(GOOGLE_SHEET_ID_VOICE_ACTOR)
         except (RequestException, RuntimeError, csv.Error) as exc:
             logger.warning("Voice Actor sheet read failed: %s", exc)
-            await interaction.followup.send(
-                "Could not read the Voice Actor sheet right now. Check the sheet sharing settings and try again.",
-                ephemeral=True,
-            )
+            await interaction.followup.send(f"Could not read the Voice Actor sheet: {exc}", ephemeral=True)
             return
 
         row = find_row(records, ("discord",), username)
@@ -446,13 +423,10 @@ def build_bot() -> commands.Bot:
         }
 
         try:
-            draft = await call_llm(build_va_application_prompt(info))
+            draft = await call_ollama(build_va_application_prompt(info))
         except (RequestException, ValueError) as exc:
-            logger.warning("LLM draft failed for VA application '%s': %s", username, exc)
-            await interaction.followup.send(
-                "Could not generate a draft right now. Please try again shortly.",
-                ephemeral=True,
-            )
+            logger.warning("Ollama draft failed for VA application '%s': %s", username, exc)
+            await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
         await post_for_review(
@@ -476,10 +450,7 @@ def build_bot() -> commands.Bot:
             records = await get_sheet_records(GOOGLE_SHEET_ID_DUB_REQUEST)
         except (RequestException, RuntimeError, csv.Error) as exc:
             logger.warning("VA Request sheet read failed: %s", exc)
-            await interaction.followup.send(
-                "Could not read the VA Request sheet right now. Check the sheet sharing settings and try again.",
-                ephemeral=True,
-            )
+            await interaction.followup.send(f"Could not read the VA Request sheet: {exc}", ephemeral=True)
             return
 
         row = find_row(records, ("creator", "name"), username)
@@ -499,21 +470,18 @@ def build_bot() -> commands.Bot:
 
         try:
             # Generate BOTH drafts sequentially
-            creator_draft = await call_llm(build_va_request_prompt(info))
+            creator_draft = await call_ollama(build_va_request_prompt(info))
             
             # Only generate a pitch draft if they actually asked for a specific VA
             if info['specific_va'] and info['specific_va'].lower() != "none":
-                pitch_draft = await call_llm(build_va_pitch_prompt(info))
+                pitch_draft = await call_ollama(build_va_pitch_prompt(info))
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}\n\n**To the VA:**\n{pitch_draft}"
             else:
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}"
 
         except (RequestException, ValueError) as exc:
-            logger.warning("LLM draft failed for VA request '%s': %s", username, exc)
-            await interaction.followup.send(
-                "Could not generate a draft right now. Please try again shortly.",
-                ephemeral=True,
-            )
+            logger.warning("Ollama draft failed for VA request '%s': %s", username, exc)
+            await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
         await post_for_review(
@@ -535,17 +503,6 @@ def main() -> None:
         bot.run(DISCORD_TOKEN, log_handler=None)
     except discord.LoginFailure:
         logger.critical("Discord login failed — check DISCORD_TOKEN")
-        raise
-    except discord.HTTPException as exc:
-        # Usually a 429 / Cloudflare 1015 IP ban. Exiting immediately would make
-        # the host restart us in a tight loop, generating more blocked requests
-        # and extending the ban, so wait before exiting.
-        logger.critical(
-            "Discord HTTP error at startup (status=%s); sleeping %ss before exit to avoid a restart loop",
-            exc.status,
-            STARTUP_FAILURE_BACKOFF_SECONDS,
-        )
-        time.sleep(STARTUP_FAILURE_BACKOFF_SECONDS)
         raise
 
 
