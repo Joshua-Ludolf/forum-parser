@@ -9,6 +9,7 @@ from urllib.parse import quote
 
 import discord
 import requests
+from aiohttp import web
 from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
@@ -25,6 +26,7 @@ logger = logging.getLogger("va-bot")
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
 MODERATOR_CHANNEL_ID = int(os.getenv("MODERATOR_CHANNEL_ID", "0"))
+HEALTH_CHECK_PORT = int(os.getenv("HEALTH_CHECK_PORT", "8080"))
 
 # Optional: set this to your server's ID while testing so slash commands sync
 # instantly to that one guild instead of taking up to an hour to appear globally.
@@ -354,6 +356,26 @@ async def post_for_review(
 
 
 # ---------------------------------------------------------------------------
+# Health check server for Railway
+# ---------------------------------------------------------------------------
+
+async def health_check(request: web.Request) -> web.Response:
+    return web.Response(text="OK", status=200)
+
+
+async def start_health_server() -> web.AppRunner:
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", HEALTH_CHECK_PORT)
+    await site.start()
+    logger.info("Health check server started on port %d", HEALTH_CHECK_PORT)
+    return runner
+
+
+# ---------------------------------------------------------------------------
 # Bot setup
 # ---------------------------------------------------------------------------
 
@@ -496,14 +518,25 @@ def build_bot() -> commands.Bot:
     return bot
 
 
-def main() -> None:
+async def run_bot_with_health() -> None:
     validate_config()
     bot = build_bot()
+
+    # Start health check server
+    health_runner = await start_health_server()
+
     try:
-        bot.run(DISCORD_TOKEN, log_handler=None)
+        # Start the bot (this blocks until the bot stops)
+        await bot.start(DISCORD_TOKEN)
     except discord.LoginFailure:
         logger.critical("Discord login failed — check DISCORD_TOKEN")
         raise
+    finally:
+        await health_runner.cleanup()
+
+
+def main() -> None:
+    asyncio.run(run_bot_with_health())
 
 
 if __name__ == "__main__":
