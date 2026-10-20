@@ -41,7 +41,7 @@ GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Form Responses 1")
 SHEET_CACHE_TTL_SECONDS = int(os.getenv("SHEET_CACHE_TTL_SECONDS", "45"))
 
 OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma4:12b-it-qat")
 # First request after Ollama starts (or after it's been idle) has to load the
 # model into memory first, which can take well over a minute for larger
 # models. 60s was too tight; 180s gives room for cold starts on modest hardware.
