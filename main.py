@@ -40,12 +40,10 @@ GOOGLE_WORKSHEET_NAME = os.getenv("GOOGLE_WORKSHEET_NAME", "Form Responses 1")
 # Keeps repeated command usage from hammering the public CSV endpoint.
 SHEET_CACHE_TTL_SECONDS = int(os.getenv("SHEET_CACHE_TTL_SECONDS", "45"))
 
-OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "gemma3:12b")
-# First request after Ollama starts (or after it's been idle) has to load the
-# model into memory first, which can take well over a minute for larger
-# models. 60s was too tight; 180s gives room for cold starts on modest hardware.
-OLLAMA_TIMEOUT_SECONDS = int(os.getenv("OLLAMA_TIMEOUT_SECONDS", "180"))
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "google/gemma-3-12b-it:free")
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_TIMEOUT_SECONDS = int(os.getenv("OPENROUTER_TIMEOUT_SECONDS", "60"))
 
 
 def validate_config() -> None:
@@ -54,6 +52,7 @@ def validate_config() -> None:
         "MODERATOR_CHANNEL_ID": str(MODERATOR_CHANNEL_ID) if MODERATOR_CHANNEL_ID else "",
         "GOOGLE_SHEET_ID_VOICE_ACTOR": GOOGLE_SHEET_ID_VOICE_ACTOR,
         "GOOGLE_SHEET_ID_DUB_REQUEST": GOOGLE_SHEET_ID_DUB_REQUEST,
+        "OPENROUTER_API_KEY": OPENROUTER_API_KEY,
     }
     missing = [name for name, value in required.items() if not value]
     if missing:
@@ -159,33 +158,37 @@ def find_row(records: list[dict], keywords: tuple[str, ...], target_text: str) -
 
 
 # ---------------------------------------------------------------------------
-# Ollama drafting
+# OpenRouter drafting
 # ---------------------------------------------------------------------------
 
-def _call_ollama_sync(prompt: str) -> str:
+def _call_openrouter_sync(prompt: str) -> str:
     """Blocking network call — always run this via asyncio.to_thread."""
+    headers = {
+        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+        "Content-Type": "application/json",
+    }
     payload = {
-        "model": OLLAMA_MODEL,
+        "model": OPENROUTER_MODEL,
         "messages": [{"role": "user", "content": prompt}],
-        "stream": False,
     }
     response = requests.post(
-        f"{OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+        f"{OPENROUTER_BASE_URL.rstrip('/')}/chat/completions",
         json=payload,
-        timeout=OLLAMA_TIMEOUT_SECONDS,
+        headers=headers,
+        timeout=OPENROUTER_TIMEOUT_SECONDS,
     )
     response.raise_for_status()
     body = response.json()
-    return body.get("message", {}).get("content", "").strip() or (
+    return body.get("choices", [{}])[0].get("message", {}).get("content", "").strip() or (
         "I could not generate a response right now."
     )
 
 
-async def call_ollama(prompt: str) -> str:
-    logger.info("Requesting draft from Ollama model '%s' (timeout=%ss)...", OLLAMA_MODEL, OLLAMA_TIMEOUT_SECONDS)
+async def call_openrouter(prompt: str) -> str:
+    logger.info("Requesting draft from OpenRouter model '%s' (timeout=%ss)...", OPENROUTER_MODEL, OPENROUTER_TIMEOUT_SECONDS)
     start = time.monotonic()
-    result = await asyncio.to_thread(_call_ollama_sync, prompt)
-    logger.info("Ollama responded in %.1fs", time.monotonic() - start)
+    result = await asyncio.to_thread(_call_openrouter_sync, prompt)
+    logger.info("OpenRouter responded in %.1fs", time.monotonic() - start)
     return result
 
 
@@ -445,9 +448,9 @@ def build_bot() -> commands.Bot:
         }
 
         try:
-            draft = await call_ollama(build_va_application_prompt(info))
+                    draft = await call_openrouter(build_va_application_prompt(info))
         except (RequestException, ValueError) as exc:
-            logger.warning("Ollama draft failed for VA application '%s': %s", username, exc)
+                    logger.warning("OpenRouter draft failed for VA application '%s': %s", username, exc)
             await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
@@ -492,17 +495,17 @@ def build_bot() -> commands.Bot:
 
         try:
             # Generate BOTH drafts sequentially
-            creator_draft = await call_ollama(build_va_request_prompt(info))
+                    creator_draft = await call_openrouter(build_va_request_prompt(info))
             
             # Only generate a pitch draft if they actually asked for a specific VA
             if info['specific_va'] and info['specific_va'].lower() != "none":
-                pitch_draft = await call_ollama(build_va_pitch_prompt(info))
+                        pitch_draft = await call_openrouter(build_va_pitch_prompt(info))
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}\n\n**To the VA:**\n{pitch_draft}"
             else:
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}"
 
         except (RequestException, ValueError) as exc:
-            logger.warning("Ollama draft failed for VA request '%s': %s", username, exc)
+                    logger.warning("OpenRouter draft failed for VA request '%s': %s", username, exc)
             await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
