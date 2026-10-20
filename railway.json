@@ -14,36 +14,10 @@
         "restartPolicyMaxRetries": 10
       },
       "variables": {
-        "OLLAMA_BASE_URL": "http://ollama:11434",
-        "OLLAMA_MODEL": "gemma4:12b-it-qat",
+        "OPENROUTER_BASE_URL": "https://openrouter.ai/api/v1",
+        "OPENROUTER_MODEL": "google/gemma-3-12b-it:free",
+        "OPENROUTER_TIMEOUT_SECONDS": "60",
         "HEALTH_CHECK_PORT": "8080"
-      }
-    },
-    "ollama": {
-      "image": "ollama/ollama:latest",
-      "deploy": {
-        "startCommand": "ollama serve",
-        "healthcheckPath": "/api/tags",
-        "healthcheckTimeout": 300,
-        "restartPolicyType": "ON_FAILURE",
-        "restartPolicyMaxRetries": 10
-      },
-      "variables": {
-        "OLLAMA_HOST": "0.0.0.0:11434"
-      }
-    },
-    "pull-model": {
-      "build": {
-        "builder": "DOCKERFILE",
-        "dockerfilePath": "Dockerfile.pull-model"
-      },
-      "deploy": {
-        "startCommand": "./pull-model.sh",
-        "restartPolicyType": "NEVER"
-      },
-      "variables": {
-        "OLLAMA_HOST": "http://ollama:11434",
-        "OLLAMA_MODEL": "gemma4:12b-it-qat"
       }
     }
   }
