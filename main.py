@@ -448,9 +448,9 @@ def build_bot() -> commands.Bot:
         }
 
         try:
-                    draft = await call_openrouter(build_va_application_prompt(info))
+            draft = await call_openrouter(build_va_application_prompt(info))
         except (RequestException, ValueError) as exc:
-                    logger.warning("OpenRouter draft failed for VA application '%s': %s", username, exc)
+            logger.warning("OpenRouter draft failed for VA application '%s': %s", username, exc)
             await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
@@ -495,17 +495,17 @@ def build_bot() -> commands.Bot:
 
         try:
             # Generate BOTH drafts sequentially
-                    creator_draft = await call_openrouter(build_va_request_prompt(info))
+            creator_draft = await call_openrouter(build_va_request_prompt(info))
             
             # Only generate a pitch draft if they actually asked for a specific VA
             if info['specific_va'] and info['specific_va'].lower() != "none":
-                        pitch_draft = await call_openrouter(build_va_pitch_prompt(info))
+                pitch_draft = await call_openrouter(build_va_pitch_prompt(info))
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}\n\n**To the VA:**\n{pitch_draft}"
             else:
                 final_combined_draft = f"**To the Creator:**\n{creator_draft}"
 
         except (RequestException, ValueError) as exc:
-                    logger.warning("OpenRouter draft failed for VA request '%s': %s", username, exc)
+            logger.warning("OpenRouter draft failed for VA request '%s': %s", username, exc)
             await interaction.followup.send(f"Could not generate a draft right now: {exc}", ephemeral=True)
             return
 
